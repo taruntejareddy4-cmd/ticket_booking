@@ -1,9 +1,14 @@
-from datetime import datetime
+import os
+from datetime import datetime, timedelta, timezone
 
+import jwt
+from dotenv import load_dotenv
 from flask import Flask, jsonify, request
 from flask_sqlalchemy import SQLAlchemy
-from werkzeug.security import generate_password_hash, check_password_hash
+from werkzeug.security import check_password_hash, generate_password_hash
 
+load_dotenv()
+SECRET_KEY = os.environ.get("SECRET_KEY")
 
 app = Flask(__name__)
 
@@ -89,6 +94,29 @@ def create_user():
             "email": new_user.email
         }
     }), 201
+
+
+# POST API for login
+@app.route("/login", methods=["POST"])
+def login():
+    request_data = request.get_json(silent=True) or {}
+    email = request_data.get("email")
+    password = request_data.get("password")
+
+    if not email or not password:
+        return jsonify({"error": "Email and password are required"}), 400
+
+    found_user = User.query.filter_by(email=email).first()
+    if found_user is None or not check_password_hash(found_user.password_hash, password):
+        return jsonify({"error": "Invalid email or password"}), 401
+
+    payload = {
+        "sub": str(found_user.id),
+        "exp": datetime.now(timezone.utc) + timedelta(minutes=30),
+    }
+    token = jwt.encode(payload, SECRET_KEY, algorithm="HS256")
+
+    return jsonify({"token": token, "name": found_user.name}), 200
 
 
 if __name__ == "__main__":
