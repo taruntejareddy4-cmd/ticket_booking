@@ -119,30 +119,42 @@ def login():
 
     return jsonify({"token": token, "name": found_user.name}), 200
 
+def login_required(f):
+    @wraps(f)
+    def wrapper(*args, **kwargs):
+        auth_header = request.headers.get("Authorization", "")
+        if not auth_header.startswith("Bearer "):
+            return jsonify({"error": "token is missing or malformed"}), 401
+
+        token = auth_header.split(" ")[1]
+
+        try:
+            payload = jwt.decode(token, SECRET_KEY, algorithms=["HS256"])
+        except jwt.ExpiredSignatureError:
+            return jsonify({"error": "token has expired"}), 401
+        except jwt.InvalidTokenError:
+            return jsonify({"error": "invalid token"}), 401
+
+        found_user = User.query.filter_by(id=int(payload["sub"])).first()
+        if found_user is None:
+            return jsonify({"error": "user not found"}), 401
+
+        g.user = found_user
+        return f(*args, **kwargs)
+
+    return wrapper
+
+
 @app.route("/me", methods=["GET"])
+@login_required
 def me():
-    auth_header = request.headers.get("authorization")
-    if not auth_header:
-        return jsonify({"error": "token is missing"}), 401
-    token = auth_header.replace("Bearer ", "")
-    try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=["HS256"])
-    except jwt.ExpiredSignatureError:
-        return jsonify({"error": "token has expired"}), 401
-    except jwt.InvalidTokenError:
-        return jsonify({"error": "invalid token"}), 401
-
-    found_user = User.query.filter_by(id=int(payload["sub"])).first()
-    if found_user is None:
-        return jsonify({"error": "user not found"}), 401
-
     return jsonify({
-        "id": found_user.id,
-        "name": found_user.name,
-        "email": found_user.email,
-        "dob": found_user.dob.isoformat(),
-        "gender": found_user.gender,
-    }),200
+        "id": g.user.id,
+        "name": g.user.name,
+        "email": g.user.email,
+        "dob": g.user.dob.isoformat(),
+        "gender": g.user.gender,
+    }), 200
 
 
 if __name__ == "__main__":
