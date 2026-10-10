@@ -30,6 +30,42 @@ class User(db.Model):
     email = db.Column(db.String(255), unique=True, nullable=False)
     password_hash = db.Column(db.String(255), nullable=False)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    is_admin = db.Column(db.Boolean, nullable=False, default=False)
+
+class Movie(db.Model):
+    __tablename__ = "movies"
+
+    id = db.Column(db.Integer, primary_key=True)
+    title = db.Column(db.String(150), nullable=False)
+    duration_minutes = db.Column(db.Integer, nullable=False)
+    language = db.Column(db.String(50), nullable=False)
+    genre = db.Column(db.String(50))
+
+
+class Theatre(db.Model):
+    __tablename__ = "theatres"
+
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(100), nullable=False)
+    city = db.Column(db.String(100), nullable=False)
+
+
+class Screen(db.Model):
+    __tablename__ = "screens"
+
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(50), nullable=False)
+    theatre_id = db.Column(db.Integer, db.ForeignKey("theatres.id"), nullable=False)
+
+
+class Show(db.Model):
+    __tablename__ = "shows"
+
+    id = db.Column(db.Integer, primary_key=True)
+    movie_id = db.Column(db.Integer, db.ForeignKey("movies.id"), nullable=False)
+    screen_id = db.Column(db.Integer, db.ForeignKey("screens.id"), nullable=False)
+    start_time = db.Column(db.DateTime, nullable=False)
+    price = db.Column(db.Numeric(8, 2), nullable=False)
 
 
 @app.route("/")
@@ -57,6 +93,11 @@ def create_user():
 
     if not dob:
         return jsonify({"error": "Date of Birth is required"}), 400
+
+    try:
+        dob = datetime.strptime(dob, "%Y-%m-%d").date()
+    except (ValueError, TypeError):
+        return jsonify({"error": "dob must be in YYYY-MM-DD format"}), 400
 
     if not gender:
         return jsonify({"error": "Gender is required"}), 400
@@ -90,7 +131,7 @@ def create_user():
         "user": {
             "id": new_user.id,
             "name": new_user.name,
-            "dob": new_user.dob,
+            "dob": new_user.dob.isoformat(),
             "gender": new_user.gender,
             "email": new_user.email
         }
