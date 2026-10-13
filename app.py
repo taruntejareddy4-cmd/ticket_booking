@@ -508,6 +508,73 @@ def get_theatres():
         ]
     }), 200
 
+# ADD SCREEN - ADMIN ONLY
+@app.route("/screens", methods=["POST"])
+@login_required
+@admin_required
+def add_screen():
+    data = request.get_json(silent=True)
+
+    if not isinstance(data, dict):
+        return jsonify({"error": "Valid JSON data is required"}), 400
+
+    name = data.get("name")
+    theatre_id = data.get("theatre_id")
+
+    if not isinstance(name, str) or not name.strip():
+        return jsonify({"error": "Name is required"}), 400
+
+    if (
+        isinstance(theatre_id, bool)
+        or not isinstance(theatre_id, int)
+        or theatre_id <= 0
+    ):
+        return jsonify({"error": "theatre_id must be a positive integer"}), 400
+
+    # <-- your theatre check goes here
+    theatre = db.session.get(Theatre, theatre_id)
+    if theatre is None:
+        return jsonify({"error": "Theatre not found"}), 404
+
+    screen = Screen(name=name.strip(), theatre_id=theatre_id)
+
+    db.session.add(screen)
+    db.session.commit()
+
+    return jsonify({
+        "message": "Screen added successfully",
+        "screen": {
+            "id": screen.id,
+            "name": screen.name,
+            "theatre_id": screen.theatre_id
+        }
+    }), 201
+
+# GET ALL SCREENS (optional ?theatre_id= filter)
+@app.route("/screens", methods=["GET"])
+def get_screens():
+    theatre_id = request.args.get("theatre_id", type=int)
+
+    if "theatre_id" in request.args and theatre_id is None:
+        return jsonify({"error": "theatre_id must be an integer"}), 400
+
+    query = Screen.query
+
+    if theatre_id is not None:
+        query = query.filter_by(theatre_id=theatre_id)
+
+    screens = query.all()
+
+    return jsonify({
+        "screens": [
+            {
+                "id": screen.id,
+                "name": screen.name,
+                "theatre_id": screen.theatre_id
+            }
+            for screen in screens
+        ]
+    }), 200
 
 # GET LOGGED-IN USER PROFILE
 @app.route("/me", methods=["GET"])
