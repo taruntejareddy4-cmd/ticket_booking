@@ -8,6 +8,7 @@ from dotenv import load_dotenv
 from flask import Flask, jsonify, request, g
 from flask_sqlalchemy import SQLAlchemy
 from werkzeug.security import check_password_hash, generate_password_hash
+from sqlalchemy.exc import IntegrityError
 
 load_dotenv()
 SECRET_KEY = os.environ.get("SECRET_KEY")
@@ -90,6 +91,27 @@ class Show(db.Model):
     start_time = db.Column(db.DateTime, nullable=False)
     price = db.Column(db.Numeric(8, 2), nullable=False)
 
+
+# BOOKING MODEL
+class Booking(db.Model):
+    __tablename__ = "bookings"
+
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(
+        db.Integer, db.ForeignKey("users.id"), nullable=False
+    )
+    show_id = db.Column(
+        db.Integer, db.ForeignKey("shows.id"), nullable=False
+    )
+    seat_number = db.Column(db.String(10), nullable=False)
+    booked_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    __table_args__ = (
+        db.UniqueConstraint(
+            "show_id", "seat_number",
+            name="unique_show_seat"
+        ),
+    )
 
 
 
@@ -724,6 +746,100 @@ def get_movie_shows(movie_id):
             }
             for show, screen, theatre in results
         ]
+    }), 200
+
+
+
+# POST API - BOOK A TICKET
+@app.route("/bookings", methods=["POST"])
+@login_required
+def create_booking():
+    data = request.get_json(silent=True)
+
+    if not isinstance(data, dict):
+        return jsonify({"error": "Valid JSON data is required"}), 400
+
+    show_id = data.get("show_id")
+    seat_number = data.get("seat_number")
+
+    if isinstance(show_id, bool) or not isinstance(show_id, int) or show_id <= 0:
+        return jsonify({"error": "Valid show_id is required"}), 400
+
+    if not isinstance(seat_number, str) or not seat_number.strip():
+        return jsonify({"error": "Seat number is required"}), 400
+
+    seat_number = seat_number.strip().upper()
+
+    if len(seat_number) > 10:
+        return jsonify({"error": "Seat number is too long"}), 400
+
+    show = db.session.get(Show, show_id)
+
+    if show is None:
+        return jsonify({"error": "Show not found"}), 404
+
+    booking = Booking(
+        user_id=g.user.id,
+        show_id=show_id,
+        seat_number=seat_number
+    )
+
+    db.session.add(booking)
+
+    try:
+        db.session.commit()
+    except IntegrityError:
+        db.session.rollback()
+        return jsonify({"error": "Seat already booked for this show"}), 409
+
+    return jsonify({
+        "message": "Ticket booked successfully",
+        "booking": {
+            "id": booking.id,
+            "show_id": booking.show_id,
+            "seat_number": booking.seat_number
+        }
+    }), 201
+
+
+# GET API - GET MY BOOKINGS
+@app.route("/bookings/my", methods=["GET"])
+@login_required
+def get_my_bookings():
+    bookings = Booking.query.filter_by(
+        user_id=g.user.id
+    ).order_by(Booking.booked_at.desc()).all()
+
+    return jsonify({
+        "bookings": [
+            {
+                "id": booking.id,
+                "show_id": booking.show_id,
+                "seat_number": booking.seat_number,
+                "booked_at": booking.booked_at.isoformat()
+            }
+            for booking in bookings
+        ]
+    }), 200
+
+
+# DELETE API - CANCEL MY BOOKING
+@app.route("/bookings/<int:booking_id>", methods=["DELETE"])
+@login_required
+def cancel_booking(booking_id):
+    booking = Booking.query.filter_by(
+        id=booking_id,
+        user_id=g.user.id
+    ).first()
+
+    if booking is None:
+        return jsonify({"error": "Booking not found"}), 404
+
+    db.session.delete(booking)
+    db.session.commit()
+
+    return jsonify({
+        "message": "Booking cancelled successfully"
     }), 200
 
 
