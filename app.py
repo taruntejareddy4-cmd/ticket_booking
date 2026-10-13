@@ -57,6 +57,7 @@ class Theatre(db.Model):
     city = db.Column(db.String(100), nullable=False)
 
 
+
 # SCREEN MODEL
 class Screen(db.Model):
     __tablename__ = "screens"
@@ -68,6 +69,7 @@ class Screen(db.Model):
         db.ForeignKey("theatres.id"),
         nullable=False
     )
+
 
 
 # SHOW MODEL
@@ -87,6 +89,8 @@ class Show(db.Model):
     )
     start_time = db.Column(db.DateTime, nullable=False)
     price = db.Column(db.Numeric(8, 2), nullable=False)
+
+
 
 
 # AUTHENTICATION DECORATOR
@@ -130,10 +134,13 @@ def login_required(f):
     return wrapper
 
 
+
 # HEALTH CHECK API
 @app.route("/")
 def hello():
     return jsonify({"status": "ok"}), 200
+
+
 
 
 # USER REGISTRATION API
@@ -206,6 +213,7 @@ def create_user():
     }), 201
 
 
+
 # USER LOGIN API
 @app.route("/login", methods=["POST"])
 def login():
@@ -255,6 +263,8 @@ def login():
         "name": found_user.name
     }), 200
 
+
+
 # ADMIN CHECK DECORATOR
 # Always use it BELOW @login_required
 def admin_required(f):
@@ -265,6 +275,8 @@ def admin_required(f):
         return f(*args, **kwargs)
 
     return wrapper
+
+
 
 # GET ALL MOVIES
 @app.route("/movies", methods=["GET"])
@@ -285,6 +297,7 @@ def get_movies():
     }), 200
 
 
+
 # GET MOVIE BY ID
 @app.route("/movies/<int:movie_id>", methods=["GET"])
 def get_movie(movie_id):
@@ -300,6 +313,7 @@ def get_movie(movie_id):
         "language": movie.language,
         "genre": movie.genre
     }), 200
+
 
 
 # ADD MOVIE - ADMIN ONLY
@@ -357,6 +371,7 @@ def add_movie():
             "genre": movie.genre
         }
     }), 201
+
 
 
 # UPDATE MOVIE - ADMIN ONLY
@@ -434,6 +449,7 @@ def update_movie(movie_id):
     }), 200
 
 
+
 # DELETE MOVIE - ADMIN ONLY
 @app.route("/movies/<int:movie_id>", methods=["DELETE"])
 @login_required
@@ -450,6 +466,8 @@ def delete_movie(movie_id):
     db.session.commit()
 
     return jsonify({"message": "Movie deleted successfully"}), 200
+
+
 
 # ADD THEATRE - ADMIN ONLY
 @app.route("/theatres", methods=["POST"])
@@ -485,6 +503,7 @@ def add_theatre():
     }), 201
 
 
+
 # GET ALL THEATRES (optional ?city= filter)
 @app.route("/theatres", methods=["GET"])
 def get_theatres():
@@ -507,6 +526,8 @@ def get_theatres():
             for theatre in theatres
         ]
     }), 200
+
+
 
 # ADD SCREEN - ADMIN ONLY
 @app.route("/screens", methods=["POST"])
@@ -550,6 +571,8 @@ def add_screen():
         }
     }), 201
 
+
+
 # GET ALL SCREENS (optional ?theatre_id= filter)
 @app.route("/screens", methods=["GET"])
 def get_screens():
@@ -575,6 +598,136 @@ def get_screens():
             for screen in screens
         ]
     }), 200
+
+
+
+
+# POST API - ADD SHOW (ADMIN ONLY)
+@app.route("/shows", methods=["POST"])
+@login_required
+@admin_required
+def add_show():
+    data = request.get_json(silent=True)
+
+    if not isinstance(data, dict):
+        return jsonify({"error": "Valid JSON data is required"}), 400
+
+    movie_id = data.get("movie_id")
+    screen_id = data.get("screen_id")
+    start_time = data.get("start_time")
+    price = data.get("price")
+
+    if not movie_id or not screen_id or not start_time or price is None:
+        return jsonify({"error": "All fields are required"}), 400
+
+    try:
+        start_time = datetime.strptime(start_time, "%Y-%m-%dT%H:%M:%S")
+        price = float(price)
+
+        if price <= 0:
+            return jsonify({"error": "Price must be positive"}), 400
+    except (ValueError, TypeError):
+        return jsonify({"error": "Invalid start_time or price"}), 400
+
+    movie = db.session.get(Movie, movie_id)
+    screen = db.session.get(Screen, screen_id)
+
+    if movie is None:
+        return jsonify({"error": "Movie not found"}), 404
+
+    if screen is None:
+        return jsonify({"error": "Screen not found"}), 404
+
+    show = Show(
+        movie_id=movie_id,
+        screen_id=screen_id,
+        start_time=start_time,
+        price=price
+    )
+
+    db.session.add(show)
+    db.session.commit()
+
+    return jsonify({
+        "message": "Show scheduled successfully",
+        "show": {
+            "id": show.id,
+            "movie_id": show.movie_id,
+            "screen_id": show.screen_id,
+            "start_time": show.start_time.isoformat(),
+            "price": str(show.price)
+        }
+    }), 201
+
+
+# GET API - GET ALL SHOWS
+@app.route("/shows", methods=["GET"])
+def get_shows():
+    results = db.session.query(Show, Movie, Screen, Theatre).join(
+        Movie, Show.movie_id == Movie.id
+    ).join(
+        Screen, Show.screen_id == Screen.id
+    ).join(
+        Theatre, Screen.theatre_id == Theatre.id
+    ).order_by(Show.start_time).all()
+
+    return jsonify({
+        "shows": [
+            {
+                "id": show.id,
+                "movie_id": movie.id,
+                "movie_title": movie.title,
+                "screen_id": screen.id,
+                "screen_name": screen.name,
+                "theatre_id": theatre.id,
+                "theatre_name": theatre.name,
+                "city": theatre.city,
+                "start_time": show.start_time.isoformat(),
+                "price": str(show.price)
+            }
+            for show, movie, screen, theatre in results
+        ]
+    }), 200
+
+
+# GET API - GET SHOWS FOR A PARTICULAR MOVIE
+@app.route("/movies/<int:movie_id>/shows", methods=["GET"])
+def get_movie_shows(movie_id):
+    movie = db.session.get(Movie, movie_id)
+
+    if movie is None:
+        return jsonify({"error": "Movie not found"}), 404
+
+    results = db.session.query(Show, Screen, Theatre).join(
+        Screen, Show.screen_id == Screen.id
+    ).join(
+        Theatre, Screen.theatre_id == Theatre.id
+    ).filter(
+        Show.movie_id == movie_id
+    ).order_by(Show.start_time).all()
+
+    return jsonify({
+        "movie": {
+            "id": movie.id,
+            "title": movie.title
+        },
+        "shows": [
+            {
+                "id": show.id,
+                "screen_id": screen.id,
+                "screen_name": screen.name,
+                "theatre_id": theatre.id,
+                "theatre_name": theatre.name,
+                "city": theatre.city,
+                "start_time": show.start_time.isoformat(),
+                "price": str(show.price)
+            }
+            for show, screen, theatre in results
+        ]
+    }), 200
+
+
+
 
 # GET LOGGED-IN USER PROFILE
 @app.route("/me", methods=["GET"])
