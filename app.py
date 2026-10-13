@@ -255,6 +255,16 @@ def login():
         "name": found_user.name
     }), 200
 
+# ADMIN CHECK DECORATOR
+# Always use it BELOW @login_required
+def admin_required(f):
+    @wraps(f)
+    def wrapper(*args, **kwargs):
+        if not g.user.is_admin:
+            return jsonify({"error": "Admin access required"}), 403
+        return f(*args, **kwargs)
+
+    return wrapper
 
 # GET ALL MOVIES
 @app.route("/movies", methods=["GET"])
@@ -440,6 +450,63 @@ def delete_movie(movie_id):
     db.session.commit()
 
     return jsonify({"message": "Movie deleted successfully"}), 200
+
+# ADD THEATRE - ADMIN ONLY
+@app.route("/theatres", methods=["POST"])
+@login_required
+@admin_required
+def add_theatre():
+    data = request.get_json(silent=True)
+
+    if not isinstance(data, dict):
+        return jsonify({"error": "Valid JSON data is required"}), 400
+
+    name = data.get("name")
+    city = data.get("city")
+
+    if not isinstance(name, str) or not name.strip():
+        return jsonify({"error": "Name is required"}), 400
+
+    if not isinstance(city, str) or not city.strip():
+        return jsonify({"error": "City is required"}), 400
+
+    theatre = Theatre(name=name.strip(), city=city.strip())
+
+    db.session.add(theatre)
+    db.session.commit()
+
+    return jsonify({
+        "message": "Theatre added successfully",
+        "theatre": {
+            "id": theatre.id,
+            "name": theatre.name,
+            "city": theatre.city
+        }
+    }), 201
+
+
+# GET ALL THEATRES (optional ?city= filter)
+@app.route("/theatres", methods=["GET"])
+def get_theatres():
+    city = request.args.get("city")
+
+    query = Theatre.query
+
+    if city:
+        query = query.filter_by(city=city.strip())
+
+    theatres = query.all()
+
+    return jsonify({
+        "theatres": [
+            {
+                "id": theatre.id,
+                "name": theatre.name,
+                "city": theatre.city
+            }
+            for theatre in theatres
+        ]
+    }), 200
 
 
 # GET LOGGED-IN USER PROFILE
