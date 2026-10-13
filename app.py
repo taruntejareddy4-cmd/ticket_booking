@@ -1,34 +1,29 @@
 
-# IMPORTS: Import required libraries and functions
 import os
 from datetime import datetime, timedelta, timezone
+from functools import wraps
 
 import jwt
 from dotenv import load_dotenv
-from functools import wraps
 from flask import Flask, jsonify, request, g
 from flask_sqlalchemy import SQLAlchemy
 from werkzeug.security import check_password_hash, generate_password_hash
 
-
-# ENVIRONMENT CONFIGURATION: Load the secret key from the .env file
 load_dotenv()
 SECRET_KEY = os.environ.get("SECRET_KEY")
 
-
-# FLASK APPLICATION: Create the Flask application
 app = Flask(__name__)
 
-
-# DATABASE CONNECTION: Connect Flask to the MySQL database
 app.config["SQLALCHEMY_DATABASE_URI"] = (
     "mysql+pymysql://root:@localhost:3306/ticket_booking"
 )
 
+app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
+
 db = SQLAlchemy(app)
 
 
-# USER MODEL: Define the users table and its columns
+# USER MODEL
 class User(db.Model):
     __tablename__ = "users"
 
@@ -42,7 +37,7 @@ class User(db.Model):
     is_admin = db.Column(db.Boolean, nullable=False, default=False)
 
 
-# MOVIE MODEL: Define the movies table
+# MOVIE MODEL
 class Movie(db.Model):
     __tablename__ = "movies"
 
@@ -53,7 +48,7 @@ class Movie(db.Model):
     genre = db.Column(db.String(50))
 
 
-# THEATRE MODEL: Define the theatres table
+# THEATRE MODEL
 class Theatre(db.Model):
     __tablename__ = "theatres"
 
@@ -62,102 +57,143 @@ class Theatre(db.Model):
     city = db.Column(db.String(100), nullable=False)
 
 
-# SCREEN MODEL: Define the screens table and link each screen to a theatre
+# SCREEN MODEL
 class Screen(db.Model):
     __tablename__ = "screens"
 
     id = db.Column(db.Integer, primary_key=True)
     name = db.Column(db.String(50), nullable=False)
     theatre_id = db.Column(
-        db.Integer, db.ForeignKey("theatres.id"), nullable=False
+        db.Integer,
+        db.ForeignKey("theatres.id"),
+        nullable=False
     )
 
 
-# SHOW MODEL: Define movie show timings, screens, and ticket prices
+# SHOW MODEL
 class Show(db.Model):
     __tablename__ = "shows"
 
     id = db.Column(db.Integer, primary_key=True)
     movie_id = db.Column(
-        db.Integer, db.ForeignKey("movies.id"), nullable=False
+        db.Integer,
+        db.ForeignKey("movies.id"),
+        nullable=False
     )
     screen_id = db.Column(
-        db.Integer, db.ForeignKey("screens.id"), nullable=False
+        db.Integer,
+        db.ForeignKey("screens.id"),
+        nullable=False
     )
     start_time = db.Column(db.DateTime, nullable=False)
     price = db.Column(db.Numeric(8, 2), nullable=False)
 
 
-# HEALTH CHECK API: Check whether the Flask application is running
+# AUTHENTICATION DECORATOR
+# Define this BEFORE any route using @login_required
+def login_required(f):
+    @wraps(f)
+    def wrapper(*args, **kwargs):
+        auth_header = request.headers.get("Authorization", "")
+
+        if not auth_header.startswith("Bearer "):
+            return jsonify({
+                "error": "token is missing or malformed"
+            }), 401
+
+        token = auth_header.split(" ", 1)[1]
+
+        try:
+            payload = jwt.decode(
+                token,
+                SECRET_KEY,
+                algorithms=["HS256"]
+            )
+
+            user_id = int(payload["sub"])
+
+        except jwt.ExpiredSignatureError:
+            return jsonify({"error": "token has expired"}), 401
+
+        except (jwt.InvalidTokenError, KeyError, ValueError, TypeError):
+            return jsonify({"error": "invalid token"}), 401
+
+        found_user = db.session.get(User, user_id)
+
+        if found_user is None:
+            return jsonify({"error": "user not found"}), 401
+
+        g.user = found_user
+
+        return f(*args, **kwargs)
+
+    return wrapper
+
+
+# HEALTH CHECK API
 @app.route("/")
 def hello():
-    return jsonify({"status": "ok"})
+    return jsonify({"status": "ok"}), 200
 
 
-
-# POST API - USER REGISTRATION: Receive user details and create an account
+# USER REGISTRATION API
 @app.route("/users", methods=["POST"])
 def create_user():
+    data = request.get_json(silent=True)
 
-    # Read JSON data from the request
-    data = request.get_json()
-
-    # Validate that JSON data was provided
-    if not data:
+    if not isinstance(data, dict):
         return jsonify({"error": "JSON data is required"}), 400
 
-    # Extract registration details from the JSON data
     name = data.get("name")
     dob = data.get("dob")
     gender = data.get("gender")
     email = data.get("email")
     password = data.get("password")
 
-    # Validate required fields
-    if not name:
+    if not isinstance(name, str) or not name.strip():
         return jsonify({"error": "Name is required"}), 400
 
     if not dob:
         return jsonify({"error": "Date of Birth is required"}), 400
 
-    # Convert the date string into a Python date object
     try:
         dob = datetime.strptime(dob, "%Y-%m-%d").date()
     except (ValueError, TypeError):
-        return jsonify({"error": "dob must be in YYYY-MM-DD format"}), 400
+        return jsonify({
+            "error": "dob must be in YYYY-MM-DD format"
+        }), 400
 
-    if not gender:
+    if not isinstance(gender, str) or not gender.strip():
         return jsonify({"error": "Gender is required"}), 400
 
-    if not email:
+    if not isinstance(email, str) or not email.strip():
         return jsonify({"error": "Email is required"}), 400
 
-    if not password:
+    if not isinstance(password, str) or not password:
         return jsonify({"error": "Password is required"}), 400
 
-    # Check whether the email already exists in the database
+    email = email.strip().lower()
+
     existing_user = User.query.filter_by(email=email).first()
 
     if existing_user:
         return jsonify({"error": "Email already exists"}), 409
 
-    # Hash the password before saving it
-    hashed_password = generate_password_hash(password)
-
-    # Create a new user record
     new_user = User(
-        name=name,
+        name=name.strip(),
         dob=dob,
-        gender=gender,
+        gender=gender.strip(),
         email=email,
-        password_hash=hashed_password
+        password_hash=generate_password_hash(password)
     )
 
-    # Save the new user to MySQL
-    db.session.add(new_user)
-    db.session.commit()
+    try:
+        db.session.add(new_user)
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        raise
 
-    # Return the registration success response
     return jsonify({
         "message": "User registered successfully",
         "user": {
@@ -170,117 +206,258 @@ def create_user():
     }), 201
 
 
-
-# POST API - USER LOGIN: Verify credentials and generate a JWT token
+# USER LOGIN API
 @app.route("/login", methods=["POST"])
 def login():
+    data = request.get_json(silent=True)
 
-    # Read JSON data; use an empty dictionary if parsing fails
-    request_data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return jsonify({
+            "error": "Email and password are required"
+        }), 400
 
-    # Extract login credentials
-    email = request_data.get("email")
-    password = request_data.get("password")
+    email = data.get("email")
+    password = data.get("password")
 
-    # Validate that email and password are provided
-    if not email or not password:
-        return jsonify({"error": "Email and password are required"}), 400
+    if not isinstance(email, str) or not email.strip():
+        return jsonify({
+            "error": "Email and password are required"
+        }), 400
 
-    # Find the user by email
-    found_user = User.query.filter_by(email=email).first()
+    if not isinstance(password, str) or not password:
+        return jsonify({
+            "error": "Email and password are required"
+        }), 400
 
-    # Verify the user exists and the password matches its hash
+    if not SECRET_KEY:
+        return jsonify({
+            "error": "Server secret key is not configured"
+        }), 500
+
+    found_user = User.query.filter_by(
+        email=email.strip().lower()
+    ).first()
+
     if found_user is None or not check_password_hash(
         found_user.password_hash, password
     ):
         return jsonify({"error": "Invalid email or password"}), 401
 
-    # Create JWT payload containing user ID and token expiry time
     payload = {
         "sub": str(found_user.id),
-        "exp": datetime.now(timezone.utc) + timedelta(minutes=30),
+        "exp": datetime.now(timezone.utc) + timedelta(minutes=30)
     }
 
-    # Generate a signed JWT token
     token = jwt.encode(payload, SECRET_KEY, algorithm="HS256")
 
-    # Return the token after successful login
-    return jsonify({"token": token, "name": found_user.name}), 200
+    return jsonify({
+        "token": token,
+        "name": found_user.name
+    }), 200
 
 
+# GET ALL MOVIES
+@app.route("/movies", methods=["GET"])
+def get_movies():
+    movies = Movie.query.all()
 
-# AUTHENTICATION DECORATOR: Protect routes by checking the JWT token
-def login_required(f):
+    return jsonify({
+        "movies": [
+            {
+                "id": movie.id,
+                "title": movie.title,
+                "duration_minutes": movie.duration_minutes,
+                "language": movie.language,
+                "genre": movie.genre
+            }
+            for movie in movies
+        ]
+    }), 200
 
-    # Wrapper runs before the protected route
-    @wraps(f)
-    def wrapper(*args, **kwargs):
 
-        # Read the Authorization header
-        auth_header = request.headers.get("Authorization", "")
+# GET MOVIE BY ID
+@app.route("/movies/<int:movie_id>", methods=["GET"])
+def get_movie(movie_id):
+    movie = db.session.get(Movie, movie_id)
 
-        # Check that the header uses the Bearer token format
-        if not auth_header.startswith("Bearer "):
+    if movie is None:
+        return jsonify({"error": "Movie not found"}), 404
+
+    return jsonify({
+        "id": movie.id,
+        "title": movie.title,
+        "duration_minutes": movie.duration_minutes,
+        "language": movie.language,
+        "genre": movie.genre
+    }), 200
+
+
+# ADD MOVIE - ADMIN ONLY
+@app.route("/movies", methods=["POST"])
+@login_required
+def add_movie():
+    if not g.user.is_admin:
+        return jsonify({"error": "Admin access required"}), 403
+
+    data = request.get_json(silent=True)
+
+    if not isinstance(data, dict):
+        return jsonify({"error": "Valid JSON data is required"}), 400
+
+    title = data.get("title")
+    duration = data.get("duration_minutes")
+    language = data.get("language")
+    genre = data.get("genre")
+
+    if not isinstance(title, str) or not title.strip():
+        return jsonify({"error": "Title is required"}), 400
+
+    if not isinstance(language, str) or not language.strip():
+        return jsonify({"error": "Language is required"}), 400
+
+    if (
+        isinstance(duration, bool)
+        or not isinstance(duration, int)
+        or duration <= 0
+    ):
+        return jsonify({
+            "error": "Duration must be a positive integer"
+        }), 400
+
+    if genre is not None and not isinstance(genre, str):
+        return jsonify({"error": "Genre must be text or null"}), 400
+
+    movie = Movie(
+        title=title.strip(),
+        duration_minutes=duration,
+        language=language.strip(),
+        genre=genre.strip() if genre and genre.strip() else None
+    )
+
+    db.session.add(movie)
+    db.session.commit()
+
+    return jsonify({
+        "message": "Movie added successfully",
+        "movie": {
+            "id": movie.id,
+            "title": movie.title,
+            "duration_minutes": movie.duration_minutes,
+            "language": movie.language,
+            "genre": movie.genre
+        }
+    }), 201
+
+
+# UPDATE MOVIE - ADMIN ONLY
+@app.route("/movies/<int:movie_id>", methods=["PUT"])
+@login_required
+def update_movie(movie_id):
+    if not g.user.is_admin:
+        return jsonify({"error": "Admin access required"}), 403
+
+    movie = db.session.get(Movie, movie_id)
+
+    if movie is None:
+        return jsonify({"error": "Movie not found"}), 404
+
+    data = request.get_json(silent=True)
+
+    if not isinstance(data, dict) or not data:
+        return jsonify({
+            "error": "Valid JSON data is required"
+        }), 400
+
+    if "title" in data:
+        title = data["title"]
+
+        if not isinstance(title, str) or not title.strip():
+            return jsonify({"error": "Title cannot be empty"}), 400
+
+        movie.title = title.strip()
+
+    if "duration_minutes" in data:
+        duration = data["duration_minutes"]
+
+        if (
+            isinstance(duration, bool)
+            or not isinstance(duration, int)
+            or duration <= 0
+        ):
             return jsonify({
-                "error": "token is missing or malformed"
-            }), 401
+                "error": "Duration must be a positive integer"
+            }), 400
 
-        # Extract the token from the header
-        token = auth_header.split(" ")[1]
+        movie.duration_minutes = duration
 
-        # Verify the token and check its expiry
-        try:
-            payload = jwt.decode(
-                token, SECRET_KEY, algorithms=["HS256"]
-            )
+    if "language" in data:
+        language = data["language"]
 
-        # Return an error if the token has expired
-        except jwt.ExpiredSignatureError:
-            return jsonify({"error": "token has expired"}), 401
+        if not isinstance(language, str) or not language.strip():
+            return jsonify({
+                "error": "Language cannot be empty"
+            }), 400
 
-        # Return an error if the token is invalid
-        except jwt.InvalidTokenError:
-            return jsonify({"error": "invalid token"}), 401
+        movie.language = language.strip()
 
-        # Find the user associated with the token
-        found_user = User.query.filter_by(
-            id=int(payload["sub"])
-        ).first()
+    if "genre" in data:
+        genre = data["genre"]
 
-        # Reject the request if the user no longer exists
-        if found_user is None:
-            return jsonify({"error": "user not found"}), 401
+        if genre is not None and not isinstance(genre, str):
+            return jsonify({
+                "error": "Genre must be text or null"
+            }), 400
 
-        # Store the authenticated user for this request
-        g.user = found_user
+        movie.genre = genre.strip() if genre and genre.strip() else None
 
-        # Continue to the protected route
-        return f(*args, **kwargs)
+    db.session.commit()
 
-    return wrapper
+    return jsonify({
+        "message": "Movie updated successfully",
+        "movie": {
+            "id": movie.id,
+            "title": movie.title,
+            "duration_minutes": movie.duration_minutes,
+            "language": movie.language,
+            "genre": movie.genre
+        }
+    }), 200
 
 
-# GET API - USER PROFILE: Return profile details for the logged-in user
+# DELETE MOVIE - ADMIN ONLY
+@app.route("/movies/<int:movie_id>", methods=["DELETE"])
+@login_required
+def delete_movie(movie_id):
+    if not g.user.is_admin:
+        return jsonify({"error": "Admin access required"}), 403
+
+    movie = db.session.get(Movie, movie_id)
+
+    if movie is None:
+        return jsonify({"error": "Movie not found"}), 404
+
+    db.session.delete(movie)
+    db.session.commit()
+
+    return jsonify({"message": "Movie deleted successfully"}), 200
+
+
+# GET LOGGED-IN USER PROFILE
 @app.route("/me", methods=["GET"])
 @login_required
 def me():
-
-    # Return the authenticated user's profile as JSON
     return jsonify({
         "id": g.user.id,
         "name": g.user.name,
         "email": g.user.email,
         "dob": g.user.dob.isoformat(),
-        "gender": g.user.gender,
+        "gender": g.user.gender
     }), 200
 
 
-# APPLICATION ENTRY POINT: Create tables and start the Flask server
+# APPLICATION ENTRY POINT
 if __name__ == "__main__":
-
-    # Create database tables if they do not already exist
     with app.app_context():
         db.create_all()
 
-    # Start the Flask development server
     app.run(debug=True)
