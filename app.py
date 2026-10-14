@@ -115,6 +115,29 @@ class Booking(db.Model):
 
 
 
+# SEAT MODEL
+class Seat(db.Model):
+    __tablename__ = "seats"
+
+    id = db.Column(db.Integer, primary_key=True)
+    screen_id = db.Column(
+        db.Integer,
+        db.ForeignKey("screens.id"),
+        nullable=False
+    )
+    seat_number = db.Column(db.String(10), nullable=False)
+    row_name = db.Column(db.String(5), nullable=False)
+
+    __table_args__ = (
+        db.UniqueConstraint(
+            "screen_id",
+            "seat_number",
+            name="unique_seat_per_screen"
+        ),
+    )
+
+
+
 # AUTHENTICATION DECORATOR
 # Define this BEFORE any route using @login_required
 def login_required(f):
@@ -750,7 +773,8 @@ def get_movie_shows(movie_id):
 
 
 
-# POST API - BOOK A TICKET
+
+# POST API - BOOK MULTIPLE SEATS
 @app.route("/bookings", methods=["POST"])
 @login_required
 def create_booking():
@@ -760,46 +784,94 @@ def create_booking():
         return jsonify({"error": "Valid JSON data is required"}), 400
 
     show_id = data.get("show_id")
-    seat_number = data.get("seat_number")
+    seat_numbers = data.get("seat_numbers")
 
-    if isinstance(show_id, bool) or not isinstance(show_id, int) or show_id <= 0:
+    if (
+        isinstance(show_id, bool)
+        or not isinstance(show_id, int)
+        or show_id <= 0
+    ):
         return jsonify({"error": "Valid show_id is required"}), 400
 
-    if not isinstance(seat_number, str) or not seat_number.strip():
-        return jsonify({"error": "Seat number is required"}), 400
+    if not isinstance(seat_numbers, list) or not seat_numbers:
+        return jsonify({"error": "Select at least one seat"}), 400
 
-    seat_number = seat_number.strip().upper()
+    if len(seat_numbers) > 5:
+        return jsonify({
+            "error": "You can book a maximum of 5 seats per show"
+        }), 400
 
-    if len(seat_number) > 10:
-        return jsonify({"error": "Seat number is too long"}), 400
+    if any(
+        not isinstance(seat, str) or not seat.strip()
+        for seat in seat_numbers
+    ):
+        return jsonify({"error": "Invalid seat numbers"}), 400
+
+    seat_numbers = [seat.strip().upper() for seat in seat_numbers]
+
+    if len(set(seat_numbers)) != len(seat_numbers):
+        return jsonify({"error": "Duplicate seats selected"}), 400
 
     show = db.session.get(Show, show_id)
 
     if show is None:
         return jsonify({"error": "Show not found"}), 404
 
-    booking = Booking(
+    existing_count = Booking.query.filter_by(
         user_id=g.user.id,
-        show_id=show_id,
-        seat_number=seat_number
-    )
+        show_id=show_id
+    ).count()
 
-    db.session.add(booking)
+    if existing_count + len(seat_numbers) > 5:
+        return jsonify({
+            "error": "You can book a maximum of 5 seats per show"
+        }), 400
+
+    valid_seats = Seat.query.filter(
+        Seat.screen_id == show.screen_id,
+        Seat.seat_number.in_(seat_numbers)
+    ).all()
+
+    valid_numbers = {seat.seat_number for seat in valid_seats}
+
+    if valid_numbers != set(seat_numbers):
+        return jsonify({
+            "error": "One or more seats do not belong to this screen"
+        }), 400
 
     try:
+        bookings = []
+
+        for seat_number in seat_numbers:
+            booking = Booking(
+                user_id=g.user.id,
+                show_id=show_id,
+                seat_number=seat_number
+            )
+            db.session.add(booking)
+            bookings.append(booking)
+
         db.session.commit()
+
     except IntegrityError:
         db.session.rollback()
-        return jsonify({"error": "Seat already booked for this show"}), 409
+        return jsonify({
+            "error": "One or more seats are already booked for this show"
+        }), 409
 
     return jsonify({
-        "message": "Ticket booked successfully",
-        "booking": {
-            "id": booking.id,
-            "show_id": booking.show_id,
-            "seat_number": booking.seat_number
-        }
+        "message": "Tickets booked successfully",
+        "show_id": show_id,
+        "total_seats": len(bookings),
+        "bookings": [
+            {
+                "id": booking.id,
+                "seat_number": booking.seat_number
+            }
+            for booking in bookings
+        ]
     }), 201
+
 
 
 # GET API - GET MY BOOKINGS
@@ -842,6 +914,107 @@ def cancel_booking(booking_id):
         "message": "Booking cancelled successfully"
     }), 200
 
+
+
+# CREATE SEATS FOR A SCREEN - ADMIN ONLY
+@app.route("/screens/<int:screen_id>/seats", methods=["POST"])
+@login_required
+@admin_required
+def create_seats(screen_id):
+    data = request.get_json(silent=True)
+
+    if not isinstance(data, dict):
+        return jsonify({"error": "Valid JSON data is required"}), 400
+
+    rows = data.get("rows")
+
+    if not isinstance(rows, dict) or not rows:
+        return jsonify({"error": "Rows are required"}), 400
+
+    screen = db.session.get(Screen, screen_id)
+
+    if screen is None:
+        return jsonify({"error": "Screen not found"}), 404
+
+    seats = []
+
+    for row_name, count in rows.items():
+        if (
+            not isinstance(row_name, str)
+            or not row_name.strip()
+            or len(row_name) > 5
+            or not isinstance(count, int)
+            or isinstance(count, bool)
+            or count <= 0
+        ):
+            return jsonify({"error": "Invalid row name or seat count"}), 400
+
+        row_name = row_name.strip().upper()
+
+        for number in range(1, count + 1):
+            seat_number = f"{row_name}{number}"
+
+            existing = Seat.query.filter_by(
+                screen_id=screen_id,
+                seat_number=seat_number
+            ).first()
+
+            if existing is None:
+                seats.append(
+                    Seat(
+                        screen_id=screen_id,
+                        seat_number=seat_number,
+                        row_name=row_name
+                    )
+                )
+
+    try:
+        db.session.add_all(seats)
+        db.session.commit()
+    except IntegrityError:
+        db.session.rollback()
+        return jsonify({"error": "Could not create seats"}), 409
+
+    return jsonify({
+        "message": "Seats created successfully",
+        "seats_created": len(seats)
+    }), 201
+
+
+# GET SEATING LAYOUT FOR A SHOW
+@app.route("/shows/<int:show_id>/seats", methods=["GET"])
+def get_show_seats(show_id):
+    show = db.session.get(Show, show_id)
+
+    if show is None:
+        return jsonify({"error": "Show not found"}), 404
+
+    seats = Seat.query.filter_by(
+        screen_id=show.screen_id
+    ).order_by(Seat.row_name, Seat.id).all()
+
+    bookings = Booking.query.filter_by(
+        show_id=show_id
+    ).all()
+
+    booked_numbers = {booking.seat_number for booking in bookings}
+
+    return jsonify({
+        "show_id": show_id,
+        "seats": [
+            {
+                "id": seat.id,
+                "seat_number": seat.seat_number,
+                "row_name": seat.row_name,
+                "status": (
+                    "booked"
+                    if seat.seat_number in booked_numbers
+                    else "available"
+                )
+            }
+            for seat in seats
+        ]
+    }), 200
 
 
 
