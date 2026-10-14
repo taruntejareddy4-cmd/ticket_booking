@@ -1,6 +1,6 @@
-
 import os
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from functools import wraps
 
 import jwt
@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 from flask import Flask, jsonify, request, g
 from flask_sqlalchemy import SQLAlchemy
 from werkzeug.security import check_password_hash, generate_password_hash
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, OperationalError
 
 load_dotenv()
 SECRET_KEY = os.environ.get("SECRET_KEY")
@@ -242,6 +242,9 @@ def create_user():
     try:
         db.session.add(new_user)
         db.session.commit()
+    except IntegrityError:
+        db.session.rollback()
+        return jsonify({"error": "Email already exists"}), 409
     except Exception:
         db.session.rollback()
         raise
@@ -320,6 +323,12 @@ def admin_required(f):
         return f(*args, **kwargs)
 
     return wrapper
+
+
+# SHOW TIMING HELPER
+# Used to block booking and cancelling once a show has started
+def show_has_started(show):
+    return show.start_time <= datetime.now()
 
 
 
@@ -506,6 +515,11 @@ def delete_movie(movie_id):
 
     if movie is None:
         return jsonify({"error": "Movie not found"}), 404
+
+    has_shows = Show.query.filter_by(movie_id=movie_id).first()
+
+    if has_shows:
+        return jsonify({"error": "Movie has scheduled shows"}), 409
 
     db.session.delete(movie)
     db.session.commit()
@@ -812,10 +826,16 @@ def create_booking():
     if len(set(seat_numbers)) != len(seat_numbers):
         return jsonify({"error": "Duplicate seats selected"}), 400
 
+    # Always insert in the same order so two users can't deadlock each other
+    seat_numbers = sorted(seat_numbers)
+
     show = db.session.get(Show, show_id)
 
     if show is None:
         return jsonify({"error": "Show not found"}), 404
+
+    if show_has_started(show):
+        return jsonify({"error": "Booking is closed for this show"}), 400
 
     existing_count = Booking.query.filter_by(
         user_id=g.user.id,
@@ -858,6 +878,9 @@ def create_booking():
         return jsonify({
             "error": "One or more seats are already booked for this show"
         }), 409
+    except OperationalError:
+        db.session.rollback()
+        return jsonify({"error": "Please try again"}), 503
 
     return jsonify({
         "message": "Tickets booked successfully",
@@ -878,21 +901,46 @@ def create_booking():
 @app.route("/bookings/my", methods=["GET"])
 @login_required
 def get_my_bookings():
-    bookings = Booking.query.filter_by(
-        user_id=g.user.id
-    ).order_by(Booking.booked_at.desc()).all()
+    results = (
+        db.session.query(Booking, Show, Movie, Screen, Theatre)
+        .join(Show, Booking.show_id == Show.id)
+        .join(Movie, Show.movie_id == Movie.id)
+        .join(Screen, Show.screen_id == Screen.id)
+        .join(Theatre, Screen.theatre_id == Theatre.id)
+        .filter(Booking.user_id == g.user.id)
+        .order_by(Show.start_time.desc(), Booking.seat_number)
+        .all()
+    )
 
-    return jsonify({
-        "bookings": [
-            {
-                "id": booking.id,
-                "show_id": booking.show_id,
-                "seat_number": booking.seat_number,
-                "booked_at": booking.booked_at.isoformat()
+    grouped = {}
+    now = datetime.now()
+
+    for booking, show, movie, screen, theatre in results:
+        if show.id not in grouped:
+            grouped[show.id] = {
+                "show_id": show.id,
+                "movie_title": movie.title,
+                "theatre_name": theatre.name,
+                "city": theatre.city,
+                "screen_name": screen.name,
+                "start_time": show.start_time.isoformat(),
+                "price_per_seat": str(show.price),
+                "is_upcoming": show.start_time > now,
+                "seats": []
             }
-            for booking in bookings
-        ]
-    }), 200
+
+        grouped[show.id]["seats"].append({
+            "booking_id": booking.id,
+            "seat_number": booking.seat_number,
+            "booked_at": booking.booked_at.isoformat()
+        })
+
+    for entry in grouped.values():
+        entry["total_price"] = str(
+            Decimal(entry["price_per_seat"]) * len(entry["seats"])
+        )
+
+    return jsonify({"bookings": list(grouped.values())}), 200
 
 
 # DELETE API - CANCEL MY BOOKING
@@ -906,6 +954,13 @@ def cancel_booking(booking_id):
 
     if booking is None:
         return jsonify({"error": "Booking not found"}), 404
+
+    show = db.session.get(Show, booking.show_id)
+
+    if show_has_started(show):
+        return jsonify({
+            "error": "Cannot cancel after the show has started"
+        }), 400
 
     db.session.delete(booking)
     db.session.commit()
